@@ -1251,3 +1251,60 @@ input[type='number'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- 排练预算分配 ---------- */
+.budget-panel {
+  max-height: 40%;
+}
+
+.budget-range-hint {
+  font-size: 12px;
+}
+
+.budget-table {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.budget-table th,
+.budget-table td {
+  padding: 3px 14px 3px 0;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.budget-table th {
+  color: var(--muted);
+  font-weight: normal;
+  font-size: 12px;
+}
+
+.budget-table td .dot,
+.budget-table td b {
+  vertical-align: middle;
+}
+
+.budget-table input {
+  width: 64px;
+}
+
+.budget-under {
+  color: #f87171;
+}
+
+.budget-result {
+  font-size: 14px;
+}
+
+.budget-badge {
+  margin-left: 6px;
+  font-size: 11px;
+  border-color: #f59e0b;
+  color: #fbbf24;
+}
+
+.budget-badge.bonus {
+  border-color: #38bdf8;
+  color: #7dd3fc;
+}

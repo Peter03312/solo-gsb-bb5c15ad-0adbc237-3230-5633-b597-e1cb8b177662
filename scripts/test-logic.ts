@@ -44,6 +44,7 @@ import {
 } from '../src/lib/absence';
 import type { Project } from '../src/types';
 import { uid } from '../src/lib/id';
+import { partUnderSeconds, planRehearsalBudget, type BudgetPart } from '../src/lib/budget';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -1105,6 +1106,193 @@ check('absence clamp Infinity', clampAbsence(0, Infinity, 10), null);
       [8, 10],
     ],
   );
+}
+
+// 63. 排练预算：按未达标秒数比例 + 最大余数法
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 100 },
+    { partId: 'b', name: 'B', min: 0, max: 100 },
+    { partId: 'c', name: 'C', min: 0, max: 100 },
+  ];
+  // 权重 1:2:3，10 分钟 → 1.667 / 3.333 / 5.000 → floor 1/3/5，尾差给 A(.667)、B(.333)
+  const r = planRehearsalBudget(10, parts, [1, 2, 3]);
+  check('budget proportional totals', r.ok ? r.allocations.map((a) => a.minutes) : null, [2, 3, 5]);
+  check('budget proportional sum exact', r.ok ? r.allocations.reduce((s, a) => s + a.minutes, 0) : -1, 10);
+  check(
+    'budget proportional bonus flags',
+    r.ok ? r.allocations.map((a) => a.remainderBonus) : null,
+    [true, false, false],
+  );
+  check('budget basis seconds', r.ok ? r.allocations.map((a) => a.underSeconds) : null, [1, 2, 3]);
+}
+
+// 64. 排练预算：先满足最少量，余量再按比例
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 5, max: 100 },
+    { partId: 'b', name: 'B', min: 3, max: 100 },
+  ];
+  // 先发 8，余 7 按 6:1 → A +6, B +1 → 11 / 4
+  const r = planRehearsalBudget(15, parts, [6, 1]);
+  check('budget mins first', r.ok ? r.allocations.map((a) => a.minutes) : null, [11, 4]);
+}
+
+// 65. 排练预算：触顶声部退出后对其余声部重新分配
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 4 },
+    { partId: 'b', name: 'B', min: 0, max: 100 },
+  ];
+  // 权重 1:1、10 分钟：各到 4 时 A 触顶退出（用掉 8），余 2 全给 B → 4 / 6
+  const r = planRehearsalBudget(10, parts, [1, 1]);
+  check('budget cap exits', r.ok ? r.allocations.map((a) => a.minutes) : null, [4, 6]);
+  check('budget capped flags', r.ok ? r.allocations.map((a) => a.capped) : null, [true, false]);
+}
+
+// 66. 排练预算：触顶退出时的尾差只按剩余声部小数余量分配（不补到触顶者）
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 5 },
+    { partId: 'b', name: 'B', min: 0, max: 100 },
+    { partId: 'c', name: 'C', min: 0, max: 100 },
+  ];
+  // 权重 1:1:1，上限 A=5，预算 13：连续值各 4.333（无人在水填充中触顶），
+  // floor 4×3=12，尾差按声部顺序补 A → A=5 恰好等于上限，但并非水填充触顶
+  const r = planRehearsalBudget(13, parts, [1, 1, 1]);
+  check('budget hare floor', r.ok ? r.allocations.map((a) => a.minutes) : null, [5, 4, 4]);
+  check('budget hare capped', r.ok ? r.allocations.map((a) => [a.capped, a.remainderBonus]) : null, [
+    [false, true],
+    [false, false],
+    [false, false],
+  ]);
+}
+
+// 67. 排练预算：未封顶声部缺口秒数全为零时等权分配
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 100 },
+    { partId: 'b', name: 'B', min: 0, max: 100 },
+    { partId: 'c', name: 'C', min: 0, max: 100 },
+  ];
+  // 10 / 3 = 3.333：尾差按声部顺序补前两个 → 4/3/3
+  const r = planRehearsalBudget(10, parts, [0, 0, 0]);
+  check('budget zero equal split', r.ok ? r.allocations.map((a) => a.minutes) : null, [4, 3, 3]);
+  check('budget zero equal tie order', r.ok ? r.allocations.map((a) => a.remainderBonus) : null, [
+    true,
+    false,
+    false,
+  ]);
+}
+
+// 68. 排练预算：权重为零的声部在其他声部触顶退出后，仍在剩余成员间等权
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 4 },
+    { partId: 'b', name: 'B', min: 0, max: 100 },
+    { partId: 'c', name: 'C', min: 0, max: 100 },
+  ];
+  // 权重 1:0:0：A 按比例吃满全部余量到 4 触顶（花掉 4），余 6 在 B/C 间等权 → 3/3
+  const r = planRehearsalBudget(10, parts, [1, 0, 0]);
+  check('budget zero after cap', r.ok ? r.allocations.map((a) => a.minutes) : null, [4, 3, 3]);
+}
+
+// 69. 排练预算：总预算恰好等于最少量之和（无余量）与等于最多量之和（全部触顶）
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 2, max: 5 },
+    { partId: 'b', name: 'B', min: 1, max: 3 },
+  ];
+  const rMin = planRehearsalBudget(3, parts, [9, 1]);
+  check('budget exact mins', rMin.ok ? rMin.allocations.map((a) => a.minutes) : null, [2, 1]);
+  const rMax = planRehearsalBudget(8, parts, [9, 1]);
+  check('budget exact maxes', rMax.ok ? rMax.allocations.map((a) => [a.minutes, a.capped]) : null, [
+    [5, true],
+    [3, true],
+  ]);
+}
+
+// 70. 排练预算：多轮触顶退出 + 尾差小数降序
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 2 },
+    { partId: 'b', name: 'B', min: 0, max: 3 },
+    { partId: 'c', name: 'C', min: 0, max: 100 },
+    { partId: 'd', name: 'D', min: 0, max: 100 },
+  ];
+  // 等权 1:1:1:1：各到 2 时 A 触顶退出（花 8）；B/C/D 继续到 3 时 B 触顶（再花 3，共 11）；
+  // 预算 13：余 2 在 C/D 间等权各 +1 → 2/3/4/4
+  const r = planRehearsalBudget(13, parts, [1, 1, 1, 1]);
+  check('budget multi cap', r.ok ? r.allocations.map((a) => a.minutes) : null, [2, 3, 4, 4]);
+  check(
+    'budget multi cap flags',
+    r.ok ? r.allocations.map((a) => a.capped) : null,
+    [true, true, false, false],
+  );
+}
+
+// 71. 排练预算：非法输入分别给出原因且不产出结果
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 5 },
+    { partId: 'b', name: 'B', min: 0, max: 5 },
+  ];
+  check('budget empty', planRehearsalBudget(5, [], [1]).ok, false);
+  check(
+    'budget negative total',
+    planRehearsalBudget(-1, parts, [1, 1]).error,
+    'invalid',
+  );
+  const nonInt = planRehearsalBudget(5.5, parts, [1, 1]);
+  check('budget fractional total', nonInt.error, 'invalid');
+  const order: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 4, max: 3 },
+    { partId: 'b', name: 'B', min: 0, max: 5 },
+  ];
+  check('budget min gt max', planRehearsalBudget(6, order, [1, 1]).error, 'min-gt-max');
+  const below = planRehearsalBudget(
+    2,
+    [
+      { partId: 'a', name: 'A', min: 2, max: 5 },
+      { partId: 'b', name: 'B', min: 1, max: 5 },
+    ],
+    [1, 1],
+  );
+  check('budget below min sum', below.error, 'total-below-min');
+  const above = planRehearsalBudget(11, parts, [1, 1]);
+  check('budget above max sum', above.error, 'total-above-max');
+  // 总预算为 0、界限均为 0 是合法的，结果为全 0 且恰好用完
+  const zero = planRehearsalBudget(0, parts, [3, 7]);
+  check('budget zero total valid', zero.ok ? zero.allocations.map((a) => a.minutes) : null, [0, 0]);
+}
+
+// 72. 排练预算：尾差小数降序，平分时按声部当前顺序
+{
+  const parts: BudgetPart[] = [
+    { partId: 'a', name: 'A', min: 0, max: 100 },
+    { partId: 'b', name: 'B', min: 0, max: 100 },
+    { partId: 'c', name: 'C', min: 0, max: 100 },
+  ];
+  // 权重 1:1:2，7 分钟 → 1.75 / 1.75 / 3.5：floor 1/1/3 = 5，余 2；
+  // 名额按小数降序：A/B 同为 .75 按声部顺序先拿，C(.5) 最后 → 2/2/3
+  const r = planRehearsalBudget(7, parts, [1, 1, 2]);
+  check('budget remainder order', r.ok ? r.allocations.map((a) => a.minutes) : null, [2, 2, 3]);
+  check(
+    'budget remainder bonus flags',
+    r.ok ? r.allocations.map((a) => a.remainderBonus) : null,
+    [true, true, false],
+  );
+}
+
+// 73. partUnderSeconds 基于当前工程实时覆盖，声部顺序与 parts 一致
+{
+  const p = createSampleProject();
+  const u = partUnderSeconds(p);
+  check('budget under seconds sample', u.map((x) => x.seconds), [4, 5, 2, 0]);
+  const parts = p.parts.map((x) => ({ partId: x.id, name: x.name, min: 0, max: 60 }));
+  const r = planRehearsalBudget(22, parts, u.map((x) => x.seconds));
+  // 权重 4:5:2:0，22 分钟：8/10/4/0（比例恰为整数）
+  check('budget from live coverage', r.ok ? r.allocations.map((a) => a.minutes) : null, [8, 10, 4, 0]);
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
